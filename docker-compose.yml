@@ -1,0 +1,132 @@
+version: "3.8"
+
+volumes:
+  jenkins_home:
+  kube_config:
+  postgres_data:        # Persistent DB storage — survives container restarts
+
+networks:
+  cicd-net:
+    driver: bridge
+
+services:
+
+  # ─────────────────────────────────────────────────────
+  # kind-cluster: Runs a full Kubernetes cluster in Docker
+  # ─────────────────────────────────────────────────────
+  kind-cluster:
+    image: kindest/node:v1.29.2
+    container_name: kind-control-plane
+    privileged: true
+    networks:
+      - cicd-net
+    ports:
+      - "6443:6443"     # Kubernetes API server
+    volumes:
+      - kube_config:/kube-config
+    environment:
+      - KIND_EXPERIMENTAL_DOCKER_NETWORK=cicd-net
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────────────
+  # kind-setup: One-time job that creates the cluster
+  # and writes kubeconfig for Jenkins to use
+  # ─────────────────────────────────────────────────────
+  kind-setup:
+    image: alpine/k8s:1.29.2
+    container_name: kind-setup
+    privileged: true
+    networks:
+      - cicd-net
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - kube_config:/kube-config
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "⏳ Waiting for Docker..."
+        until docker info > /dev/null 2>&1; do sleep 2; done
+        
+        if kind get clusters | grep -q "cicd-cluster"; then
+          echo "✅ Cluster already exists"
+        else
+          echo "🚀 Creating kind cluster..."
+          kind create cluster --name cicd-cluster \
+            --kubeconfig /kube-config/config \
+            --wait 120s
+          echo "✅ Cluster created"
+        fi
+        
+        # Fix API server address so Jenkins can reach it
+        sed -i "s|server: https://127.0.0.1|server: https://kind-control-plane|g" /kube-config/config
+        chmod 644 /kube-config/config
+        echo "✅ kubeconfig ready at /kube-config/config"
+    depends_on:
+      - kind-cluster
+
+  # ─────────────────────────────────────────────────────
+  # PostgreSQL: Relational database
+  # ─────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    networks:
+      - cicd-net
+    ports:
+      - "5432:5432"     # Optional: access from host with any PG client
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql  # Auto-run on first start
+    environment:
+      POSTGRES_DB: appdb
+      POSTGRES_USER: appuser
+      POSTGRES_PASSWORD: apppassword
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U appuser -d appdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────────────
+  # pgAdmin: Web UI to browse your PostgreSQL database
+  # ─────────────────────────────────────────────────────
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: pgadmin
+    networks:
+      - cicd-net
+    ports:
+      - "5050:80"       # pgAdmin UI → http://localhost:5050
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────────────
+  # Jenkins: CI/CD server with Docker + kubectl built in
+  # ─────────────────────────────────────────────────────
+  jenkins:
+    build:
+      context: ./jenkins-config
+      dockerfile: Dockerfile.jenkins
+    container_name: jenkins
+    networks:
+      - cicd-net
+    ports:
+      - "8090:8080"     # Jenkins UI  → http://localhost:8090
+      - "50000:50000"   # Agent port
+    volumes:
+      - jenkins_home:/var/jenkins_home
+      - /var/run/docker.sock:/var/run/docker.sock   # Docker access
+      - kube_config:/root/.kube                      # kubectl access
+    environment:
+      - KUBECONFIG=/root/.kube/config
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    restart: unless-stopped
+    depends_on:
+      - kind-setup
+      - postgres

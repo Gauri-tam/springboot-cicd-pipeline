@@ -1,0 +1,48 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: DemoApplication
+
+  # ───────────────────────────────────────────
+  # DataSource — PostgreSQL
+  # In Docker Compose: host = "postgres" (service name)
+  # Running locally:   host = "localhost"
+  # In Kubernetes:     injected via env vars from Secret
+  # ───────────────────────────────────────────
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:appdb}
+    username: postgres
+    password: root
+    driver-class-name: org.postgresql.Driver
+
+    # Connection pool (HikariCP — Spring Boot default)
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 30000
+
+  # ───────────────────────────────────────────
+  # JPA / Hibernate
+  # ───────────────────────────────────────────
+  jpa:
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: true
+
+# ───────────────────────────────────────────
+# Actuator — expose health (includes DB status)
+# ───────────────────────────────────────────
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info
+  endpoint:
+    health:
+      show-details: always
